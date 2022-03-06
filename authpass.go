@@ -32,10 +32,10 @@ var (
 var content embed.FS
 
 var (
-	u       string
-	p       string
-	output  string
-	persist bool
+	u         string
+	p         string
+	output    string
+	nopersist bool
 
 	re     *regexp.Regexp
 	notice *regexp.Regexp
@@ -47,7 +47,7 @@ func init() {
 
 	flag.StringVar(&u, "u", "", "开启了访问验证的隧道地址, e.g. https://something:12345")
 	flag.StringVar(&p, "p", "", "访问验证密码")
-	flag.BoolVar(&persist, "nopersist", false, "不记住认证(将于auth_time后失效)")
+	flag.BoolVar(&nopersist, "nopersist", false, "不记住认证(将于auth_time后失效)")
 	flag.StringVar(&output, "o", "authpass_generated.exe", "生成专用客户端的存放路径")
 	help := flag.Bool("h", false, "显示此帮助信息")
 	flag.Parse()
@@ -168,6 +168,9 @@ func main() {
 	form.Set("csrf", groups[1])
 	form.Set("ip", groups[2])
 	form.Set("pw", p)
+	if !nopersist {
+		form.Set("persist_auth", "on")
+	}
 	resp, err = client.PostForm(u, form)
 	if err != nil {
 		fatal("提交", u, "时发生错误:", err)

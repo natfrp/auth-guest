@@ -1,3 +1,3 @@
-module github.com/natfrp/authPass
+module github.com/natfrp/auth-guest
 
 go 1.17

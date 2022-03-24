@@ -58,9 +58,32 @@ func init() {
 	}
 }
 
+func interactParam() {
+	fmt.Printf("您未提供生成参数，请提供下面的参数: \n > 隧道访问地址(如 https://something:12345): ")
+	fmt.Scanln(&u)
+	u = strings.TrimSpace(u)
+	if pu, err := url.Parse(u); err != nil || pu.Scheme != "https" {
+		u = "https://" + u
+		if _, err = url.Parse(u); err != nil {
+			fmt.Println("您提供的隧道访问地址无法解析，请检查输入")
+			return
+		}
+	}
+
+	fmt.Printf(" > 访问验证密码: ")
+	fmt.Scanln(&p)
+	p = strings.TrimSpace(p)
+
+	var s string
+	fmt.Printf(" > 是否记住认证(Y/N, 默认为Y): ")
+	fmt.Scanln(&s)
+	nopersist = strings.ToLower(strings.TrimSpace(s)) == "n"
+}
+
 type data struct {
-	Url  string `json:"url"`
-	Pass string `json:"pass"`
+	Url     string `json:"url"`
+	Pass    string `json:"pass"`
+	Persist bool   `json:"persist"`
 }
 
 func parseEmbed() {
@@ -76,6 +99,7 @@ func parseEmbed() {
 	}
 	u = d.Url
 	p = d.Pass
+	nopersist = !d.Persist
 }
 
 func genExe() {
@@ -100,8 +124,9 @@ func genExe() {
 	index += len(t)
 
 	d := data{
-		Url:  u,
-		Pass: p,
+		Url:     u,
+		Pass:    p,
+		Persist: !nopersist,
 	}
 	j, err := json.Marshal(d)
 	if err != nil {
@@ -133,7 +158,8 @@ func main() {
 	if u == "" || p == "" {
 		parseEmbed()
 		if u == "" || p == "" {
-			flag.PrintDefaults()
+			interactParam()
+			genExe()
 			return
 		}
 	} else {

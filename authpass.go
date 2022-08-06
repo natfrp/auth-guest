@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -48,8 +49,14 @@ func init() {
 	flag.StringVar(&u, "u", "", "开启了访问验证的隧道地址, e.g. https://something:12345")
 	flag.StringVar(&p, "p", "", "访问验证密码")
 	flag.BoolVar(&nopersist, "nopersist", false, "不记住认证(将于auth_time后失效)")
-	flag.StringVar(&output, "o", "authpass_generated.exe", "生成专用客户端的存放路径")
 	help := flag.Bool("h", false, "显示此帮助信息")
+
+	if runtime.GOOS == "windows" {
+		flag.StringVar(&output, "o", "authpass_generated.exe", "生成专用客户端的存放路径")
+	} else {
+		flag.StringVar(&output, "o", "authpass_generated", "生成专用客户端的存放路径")
+	}
+
 	flag.Parse()
 
 	if *help {

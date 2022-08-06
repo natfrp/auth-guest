@@ -28,7 +28,7 @@ var (
 )
 
 // The request info and password is stored in embed file to be modified dynamically
-//go:embed data.txt
+//go:embed data.bin
 var content embed.FS
 
 var (
@@ -87,11 +87,11 @@ type data struct {
 }
 
 func parseEmbed() {
-	c, _ := content.Open("data.txt")
+	c, _ := content.Open("data.bin")
 	buf, _ := io.ReadAll(c)
 	t, _ := base64.StdEncoding.DecodeString(trait)
 	buf = bytes.TrimPrefix(buf, t)
-	buf = buf[:bytes.IndexByte(buf, '}')+1]
+	buf = buf[:bytes.IndexByte(buf, 0x18)]
 
 	d := data{}
 	if err := json.Unmarshal(buf, &d); err != nil {
@@ -137,6 +137,7 @@ func genExe() {
 	}
 
 	copy(c[index:index+maxLength], j)
+	c[index+maxLength] = 0x18
 
 	out, err := os.Create(output)
 	if err != nil {

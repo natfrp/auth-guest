@@ -6,19 +6,21 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
 )
 
 const (
-	maxLength = 160
+	maxLength = 512
 	trait     = "w6XDp+KIqw=="
 )
 
@@ -35,19 +37,23 @@ var content embed.FS
 var (
 	u         string
 	p         string
+	totp      bool
 	output    string
 	nopersist bool
 
 	re     *regexp.Regexp
 	notice *regexp.Regexp
+	redir  *regexp.Regexp
 )
 
 func init() {
 	re = regexp.MustCompile(`(?s)name="csrf" value="(?P<csrf>.*?)".*name="ip" value="(?P<ip>.*?)"`)
 	notice = regexp.MustCompile(`(?s)<div class="notice">(.*?)</div>`)
+	redir = regexp.MustCompile(`(?s)window.location = "(.*?)"`)
 
 	flag.StringVar(&u, "u", "", "开启了访问验证的隧道地址, e.g. https://something:12345")
 	flag.StringVar(&p, "p", "", "访问验证密码")
+	flag.BoolVar(&totp, "totp", false, "访问验证密码")
 	flag.BoolVar(&nopersist, "nopersist", false, "不记住认证(将于auth_time后失效)")
 	help := flag.Bool("h", false, "显示此帮助信息")
 
@@ -77,11 +83,20 @@ func interactParam() {
 		}
 	}
 
-	fmt.Printf(" > 访问验证密码: ")
+	fmt.Printf(" > 访问验证密码（如只使用 TOTP 功能，请留空）: ")
 	fmt.Scanln(&p)
 	p = strings.TrimSpace(p)
 
 	var s string
+
+	if p != "" {
+		fmt.Printf(" > 是否使用 TOTP(Y/N, 默认为N): ")
+		fmt.Scanln(&s)
+		totp = strings.ToLower(strings.TrimSpace(s)) == "y"
+	} else {
+		totp = true
+	}
+
 	fmt.Printf(" > 是否记住认证(Y/N, 默认为Y): ")
 	fmt.Scanln(&s)
 	nopersist = strings.ToLower(strings.TrimSpace(s)) == "n"
@@ -90,6 +105,7 @@ func interactParam() {
 type data struct {
 	Url     string `json:"url"`
 	Pass    string `json:"pass"`
+	Totp    bool   `json:"totp"`
 	Persist bool   `json:"persist"`
 }
 
@@ -106,6 +122,7 @@ func parseEmbed() {
 	}
 	u = d.Url
 	p = d.Pass
+	totp = d.Totp
 	nopersist = !d.Persist
 }
 
@@ -133,6 +150,7 @@ func genExe() {
 	d := data{
 		Url:     u,
 		Pass:    p,
+		Totp:    totp,
 		Persist: !nopersist,
 	}
 	j, err := json.Marshal(d)
@@ -163,9 +181,9 @@ func main() {
 	fmt.Println("===== SakuraFrp AuthPanel GuestTool =====")
 	fmt.Printf("version %s @ %s, %s\n", version, commit, date)
 
-	if u == "" || p == "" {
+	if u == "" || (p == "" && !totp) {
 		parseEmbed()
-		if u == "" || p == "" {
+		if u == "" || (p == "" && !totp) {
 			interactParam()
 			genExe()
 			return
@@ -202,6 +220,12 @@ func main() {
 	form.Set("csrf", groups[1])
 	form.Set("ip", groups[2])
 	form.Set("pw", p)
+	if totp {
+		var s string
+		fmt.Printf(" > 请输入 TOTP 一次性密码: ")
+		fmt.Scanln(&s)
+		form.Set("totp", s)
+	}
 	if !nopersist {
 		form.Set("persist_auth", "on")
 	}
@@ -221,11 +245,38 @@ func main() {
 	}
 
 	result := strings.TrimSpace(groups[1])
-	if result == "认证成功, 现在可以关闭页面并正常连接隧道了" {
+	switch {
+	case strings.HasPrefix(result, "认证成功, 正在为您跳转到后续链接"):
+		redirs := redir.FindStringSubmatch(string(res))
+		fmt.Println(redirs)
+		if len(redirs) == 2 {
+			if err := open(redirs[1]); err == nil {
+				fmt.Println("认证成功, 已为您打开后续链接")
+			} else {
+				fmt.Println("认证成功, 未能为您打开后续链接:", err)
+			}
+			pressKey()
+			break
+		}
+		fallthrough
+	case result == "认证成功, 现在可以关闭页面并正常连接隧道了":
 		fmt.Println("认证成功, 现在可以正常连接了")
 		pressKey()
-	} else {
+	default:
 		fatal("认证失败，原因:", result)
+	}
+}
+
+func open(url string) error {
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("explorer", url).Start()
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "linux":
+		return exec.Command("xdg-open", url).Start()
+	default:
+		return errors.New("os not supported")
 	}
 }
 

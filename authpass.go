@@ -31,6 +31,7 @@ var (
 )
 
 // The request info and password is stored in embed file to be modified dynamically
+//
 //go:embed data.bin
 var content embed.FS
 
@@ -194,7 +195,7 @@ func main() {
 	}
 
 	// Set skip tls verify
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	tlsConfig := &tls.Config{InsecureSkipVerify: true, ServerName: "0.0.0.0"}
 	customTransport := http.DefaultTransport.(*http.Transport).Clone()
 	customTransport.TLSClientConfig = tlsConfig
 	client := http.Client{Transport: customTransport}

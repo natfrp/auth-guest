@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"embed"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -194,8 +196,11 @@ func main() {
 		return
 	}
 
+	uri, _ := url.Parse(u)
+
 	// Set skip tls verify
-	tlsConfig := &tls.Config{InsecureSkipVerify: true, ServerName: "0.0.0.0"}
+	tlsConfig := &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12}
+
 	customTransport := http.DefaultTransport.(*http.Transport).Clone()
 	customTransport.TLSClientConfig = tlsConfig
 	client := http.Client{Transport: customTransport}
@@ -203,7 +208,22 @@ func main() {
 	// GET authpanel
 	resp, err := client.Get(u)
 	if err != nil {
-		fatal("请求", u, "时发生错误:", err)
+		if uri.Port() == "443" || net.ParseIP(uri.Hostname()) != nil {
+			fatal("请求", u, "时发生错误:", err)
+		}
+
+		// retry ip as sni
+		fmt.Println("直接请求失败，尝试替代 SNI 请求")
+		ips, err2 := net.DefaultResolver.LookupIP(context.Background(), "ip4", uri.Hostname())
+		if err2 != nil || len(ips) == 0 {
+			fatal("请求", u, "时发生错误:", err, "，并且无法解析域名:", err2)
+		}
+
+		tlsConfig.ServerName = ips[0].To4().String()
+		resp, err = client.Get(u)
+		if err != nil {
+			fatal("请求", u, "时发生错误:", err)
+		}
 	}
 	res, err := io.ReadAll(resp.Body)
 	if err != nil {

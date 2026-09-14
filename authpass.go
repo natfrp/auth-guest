@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -44,16 +45,26 @@ var (
 	output    string
 	nopersist bool
 
-	re     *regexp.Regexp
-	notice *regexp.Regexp
-	redir  *regexp.Regexp
+	re      *regexp.Regexp
+	notice  *regexp.Regexp
+	redir   *regexp.Regexp
+	head    *regexp.Regexp
+	meta    *regexp.Regexp
+	attr    *regexp.Regexp
+	refresh *regexp.Regexp
 )
 
 func init() {
 	re = regexp.MustCompile(`(?s)name="csrf" value="(?P<csrf>.*?)".*name="ip" value="(?P<ip>.*?)"`)
 	notice = regexp.MustCompile(`(?s)<div class="notice">(.*?)</div>`)
-	redir = regexp.MustCompile(`(?s)window.location = "(.*?)"`)
+	redir = regexp.MustCompile(`(?is)window\.location(?:\.href)?\s*=\s*["'](.*?)["']|window\.location\.replace\(\s*["'](.*?)["']\s*\)`)
+	head = regexp.MustCompile(`(?is)<head(?:\s[^>]*)?>(.*?)</head\s*>`)
+	meta = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+	attr = regexp.MustCompile(`(?is)([a-z_:][-a-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>` + "`" + `]+))`)
+	refresh = regexp.MustCompile(`(?is)^\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*(.*?)\s*$`)
+}
 
+func parseFlags() {
 	flag.StringVar(&u, "u", "", "开启了访问验证的隧道地址, e.g. https://something:12345")
 	flag.StringVar(&p, "p", "", "访问验证密码")
 	flag.BoolVar(&totp, "totp", false, "访问验证密码")
@@ -181,8 +192,9 @@ func genExe() {
 }
 
 func main() {
+	parseFlags()
 	fmt.Println("===== SakuraFrp AuthPanel GuestTool =====")
-	fmt.Printf("version %s @ %s, %s\n", version, commit, date)
+	fmt.Printf("version %s\n", version)
 
 	if u == "" || (p == "" && !totp) {
 		parseEmbed()
@@ -204,12 +216,16 @@ func main() {
 	customTransport := http.DefaultTransport.(*http.Transport).Clone()
 	customTransport.TLSClientConfig = tlsConfig
 	client := http.Client{Transport: customTransport}
+	postClient := client
+	postClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 
 	// GET authpanel
 	resp, err := client.Get(u)
 	if err != nil {
 		if uri.Port() == "443" || net.ParseIP(uri.Hostname()) != nil {
-			fatal("请求", u, "时发生错误:", err)
+			fatal("请求", u, "时发生错误，您可能已经通过认证，无需再次认证:", err)
 		}
 
 		// retry ip as sni
@@ -222,18 +238,22 @@ func main() {
 		tlsConfig.ServerName = ips[0].To4().String()
 		resp, err = client.Get(u)
 		if err != nil {
-			fatal("请求", u, "时发生错误:", err)
+			fatal("请求", u, "时发生错误，您可能已经通过认证，无需再次认证:", err)
 		}
 	}
 	res, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
-		fatal("请求", u, "时发生错误:", err)
+		fatal("请求", u, "时发生错误，您可能已经通过认证，无需再次认证:", err)
 	}
 
 	// parse to get csrf and ip
 	groups := re.FindStringSubmatch(string(res))
 	if len(groups) != 3 {
-		fatal("解析服务器返回内容时发生错误，原始内容:\n", string(res))
+		if resp.Header.Get("Server") != "SakuraFrp-frpc" {
+			fatal("解析服务器返回内容时发生错误，您可能已经通过认证，无需再次认证，原始内容:\n\n", string(res), "\n\n解析服务器返回内容时发生错误，您可能已经通过认证，无需再次认证")
+		}
+		fatal("解析服务器返回内容时发生错误，请尝试更新此程序或使用网页认证")
 	}
 
 	// POST authpanel
@@ -250,13 +270,19 @@ func main() {
 	if !nopersist {
 		form.Set("persist_auth", "on")
 	}
-	resp, err = client.PostForm(u, form)
-	if err != nil {
+	resp, err = postClient.PostForm(u, form)
+	if err != nil || resp == nil {
 		fatal("提交", u, "时发生错误:", err)
 	}
 	res, err = io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
 		fatal("提交", u, "时发生错误:", err)
+	}
+
+	if destination := redirDst(resp, res); destination != "" {
+		open(destination)
+		return
 	}
 
 	// parse result
@@ -268,16 +294,9 @@ func main() {
 	result := strings.TrimSpace(groups[1])
 	switch {
 	case strings.HasPrefix(result, "认证成功, 正在为您跳转到后续链接"):
-		redirs := redir.FindStringSubmatch(string(res))
-		fmt.Println(redirs)
-		if len(redirs) == 2 {
-			if err := open(redirs[1]); err == nil {
-				fmt.Println("认证成功, 已为您打开后续链接")
-			} else {
-				fmt.Println("认证成功, 未能为您打开后续链接:", err)
-			}
-			pressKey()
-			break
+		if destination := jsredirDst(resp, res); destination != "" {
+			open(destination)
+			return
 		}
 		fallthrough
 	case result == "认证成功, 现在可以关闭页面并正常连接隧道了":
@@ -288,17 +307,90 @@ func main() {
 	}
 }
 
-func open(url string) error {
+func redirDst(resp *http.Response, body []byte) string {
+	if resp.Header.Get("Server") != "SakuraFrp-frpc" {
+		return ""
+	}
+
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusSeeOther {
+		if location := strings.TrimSpace(resp.Header.Get("Location")); location != "" {
+			return parseRedir(resp, location)
+		}
+	}
+
+	content := string(body)
+	if match := head.FindStringSubmatch(content); len(match) == 2 {
+		for _, tag := range meta.FindAllString(match[1], -1) {
+			attributes := make(map[string]string)
+			for _, groups := range attr.FindAllStringSubmatch(tag, -1) {
+				value := groups[2]
+				if value == "" {
+					value = groups[3]
+				}
+				if value == "" {
+					value = groups[4]
+				}
+				attributes[strings.ToLower(groups[1])] = html.UnescapeString(value)
+			}
+			if strings.EqualFold(strings.TrimSpace(attributes["http-equiv"]), "refresh") {
+				if groups := refresh.FindStringSubmatch(attributes["content"]); len(groups) == 2 {
+					location := strings.Trim(strings.TrimSpace(groups[1]), `"'`)
+					if location != "" {
+						return parseRedir(resp, html.UnescapeString(location))
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// Only called after the auth-panel notice confirms successful authentication.
+func jsredirDst(resp *http.Response, body []byte) string {
+	if resp.Header.Get("Server") != "SakuraFrp-frpc" {
+		return ""
+	}
+	if groups := redir.FindStringSubmatch(string(body)); len(groups) > 0 {
+		for _, location := range groups[1:] {
+			if location != "" {
+				return parseRedir(resp, html.UnescapeString(location))
+			}
+		}
+	}
+	return ""
+}
+
+func parseRedir(resp *http.Response, location string) string {
+	destination, err := url.Parse(strings.TrimSpace(location))
+	if err != nil {
+		return ""
+	}
+	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+		destination = resp.Request.URL.ResolveReference(destination)
+	}
+	return destination.String()
+}
+
+func open(url string) {
+	var err error
 	switch runtime.GOOS {
 	case "windows":
-		return exec.Command("explorer", url).Start()
+		err = exec.Command("explorer", url).Start()
 	case "darwin":
-		return exec.Command("open", url).Start()
+		err = exec.Command("open", url).Start()
 	case "linux":
-		return exec.Command("xdg-open", url).Start()
+		err = exec.Command("xdg-open", url).Start()
 	default:
-		return errors.New("os not supported")
+		err = errors.New("os not supported")
 	}
+
+	if err == nil {
+		fmt.Println("认证成功, 已为您打开后续链接")
+	} else {
+		fmt.Println("认证成功, 未能为您打开后续链接:", err)
+	}
+	pressKey()
 }
 
 func fatal(things ...interface{}) {
